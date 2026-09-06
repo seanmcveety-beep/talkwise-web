@@ -11,7 +11,7 @@ app.set('trust proxy', 1);
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: '5m', etag: true }));
 
 const PORT = Number(process.env.PORT || 3000);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -39,8 +39,7 @@ const focusPrompts = {
   pattern: `\n\nSESSION FOCUS — REPEATING PATTERN: Help identify antecedents, emotional triggers, rewards, avoidance, beliefs, relationship dynamics, and one realistic experiment that could interrupt the pattern.`
 };
 
-const limiter = rateLimit({ windowMs: 60_000, limit: 40, standardHeaders: 'draft-8', legacyHeaders: false });
-app.use('/api', limiter);
+app.use('/api', rateLimit({ windowMs: 60_000, limit: 40, standardHeaders: 'draft-8', legacyHeaders: false }));
 
 function safeEqual(a, b) {
   const aa = Buffer.from(String(a)); const bb = Buffer.from(String(b));
@@ -112,7 +111,10 @@ async function openAI(req, endpoint, options = {}) {
   });
   if (!response.ok) {
     const detail = await response.text();
-    const err = new Error(`OPENAI_${response.status}`); err.status = response.status; err.detail = detail.slice(0, 700); throw err;
+    const err = new Error(`OPENAI_${response.status}`);
+    err.status = response.status;
+    err.detail = detail.slice(0, 1200);
+    throw err;
   }
   return response;
 }
@@ -183,20 +185,44 @@ app.post('/api/session/notes', requireSession, async (req, res) => {
   } catch (err) { const f = friendlyError(err); res.status(f.status).json(f.body); }
 });
 
-app.post('/api/realtime/call', requireSession, async (req, res) => {
-  const sdp = String(req.body?.sdp || '');
-  if (!sdp) return res.status(400).json({ error: 'Missing WebRTC offer.' });
+// WebRTC unified-interface endpoint. The browser sends raw SDP, and this server
+// adds the private session configuration before calling OpenAI.
+app.post('/api/realtime/call', requireSession, express.text({ type: ['application/sdp', 'text/plain'], limit: '1mb' }), async (req, res) => {
+  const sdp = String(req.body || '');
+  if (!sdp.includes('v=0')) return res.status(400).json({ error: 'The browser did not provide a valid microphone connection offer.' });
+  const style = cleanStyle(String(req.query.style || 'reflective'));
+  const focus = cleanFocus(String(req.query.focus || 'open'));
   try {
+    const sessionConfig = {
+      type: 'realtime',
+      model: VOICE_MODEL,
+      instructions: instructions(style, focus, [], `\n\nVOICE MODE: Speak naturally and conversationally. Listen carefully before responding. Prefer 2–6 spoken sentences, then pause. Ask one thoughtful question at a time. Do not read markdown punctuation aloud.`),
+      audio: {
+        input: {
+          turn_detection: {
+            type: 'server_vad',
+            threshold: 0.45,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 650,
+            create_response: true,
+            interrupt_response: true
+          }
+        },
+        output: { voice: VOICE }
+      }
+    };
     const fd = new FormData();
     fd.set('sdp', sdp);
-    fd.set('session', JSON.stringify({
-      type: 'realtime', model: VOICE_MODEL, output_modalities: ['audio'],
-      instructions: instructions(req.body?.style, req.body?.focus, req.body?.memories, `\n\nVOICE MODE: Speak naturally. Prefer 2–6 spoken sentences before pausing. Ask one thoughtful question at a time. Do not speak markdown punctuation.`),
-      audio: { input: { transcription: { model: 'gpt-live-transcribe', languages: ['en'], delay: 'low' }, turn_detection: { type: 'semantic_vad' } }, output: { voice: VOICE } }
-    }));
+    fd.set('session', JSON.stringify(sessionConfig));
     const r = await openAI(req, '/v1/realtime/calls', { method: 'POST', body: fd });
-    res.type('application/sdp').send(await r.text());
-  } catch (err) { const f = friendlyError(err); res.status(f.status).json(f.body); }
+    const answerSdp = await r.text();
+    console.log('Realtime voice session created', { model: VOICE_MODEL, voice: VOICE });
+    res.type('application/sdp').send(answerSdp);
+  } catch (err) {
+    console.error('Realtime voice setup failed', { status: err?.status, message: err?.message, detail: err?.detail });
+    const f = friendlyError(err);
+    res.status(f.status).json(f.body);
+  }
 });
 
 app.use((req, res, next) => {
