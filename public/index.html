@@ -50,18 +50,15 @@
     <section id="chatPanel" class="panel chat hidden">
       <div class="voicebar">
         <div>
-          <strong>Talk aloud</strong>
-          <span>Choose your microphone once, then click Start talking. The live level confirms TalkWise can actually hear you.</span>
-          <label style="display:block;margin-top:8px;font-size:.9rem">Microphone
-            <select id="micSelect" style="margin-left:8px;max-width:420px"><option value="">Default microphone</option></select>
-          </label>
-          <span id="voiceState">Ready for voice</span>
+          <strong>Live voice conversation</strong>
+          <span>Click once, then speak naturally. TalkWise listens for you to finish and answers aloud. You can interrupt it by speaking.</span>
+          <span id="voiceState">Voice off</span>
         </div>
         <div class="voicebuttons">
-          <button id="voiceButton" class="voicePrimary" type="button">🎙 Start talking</button>
+          <button id="voiceButton" class="voicePrimary" type="button">🎙 Start voice conversation</button>
         </div>
       </div>
-      <audio id="remoteAudio"></audio>
+      <audio id="remoteAudio" autoplay></audio>
       <div id="messages" class="messages"></div>
       <div class="composer">
         <textarea id="message" rows="3" placeholder="Type what you’re thinking..."></textarea>
@@ -74,6 +71,6 @@
       If you may be in immediate danger, call 911. In Canada, call or text 988 for suicide crisis support.
     </footer>
   </main>
-  <script src="/app.js?v=voice6"></script>
+  <script src="/app.js?v=realtime-direct-1"></script>
 </body>
 </html>
