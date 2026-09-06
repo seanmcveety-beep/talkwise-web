@@ -34,7 +34,7 @@
           <option value="relationship">Relationship</option>
           <option value="work">Work</option>
           <option value="grief">Grief</option>
-          <option value="meaning">Meaning & purpose</option>
+          <option value="meaning">Meaning &amp; purpose</option>
           <option value="pattern">Repeating pattern</option>
         </select>
       </label>
@@ -48,6 +48,17 @@
     </section>
 
     <section id="chatPanel" class="panel chat hidden">
+      <div class="voicebar">
+        <div>
+          <strong>Talk aloud</strong>
+          <span>Use your microphone and hear TalkWise answer through your speakers.</span>
+        </div>
+        <div class="voicebuttons">
+          <button id="voiceButton" class="voicePrimary" type="button">🎙 Start voice conversation</button>
+          <button id="endVoice" class="voiceStop hidden" type="button">End voice</button>
+        </div>
+      </div>
+      <audio id="remoteAudio" autoplay></audio>
       <div id="messages" class="messages"></div>
       <div class="composer">
         <textarea id="message" rows="3" placeholder="Type what you’re thinking..."></textarea>
