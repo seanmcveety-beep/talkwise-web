@@ -30,60 +30,68 @@ function handleRealtime(raw){
   if(e.type==='conversation.item.input_audio_transcription.completed'&&e.transcript?.trim()){
     const t=e.transcript.trim(); history.push({role:'user',content:t}); addMessage(t,'user');
   }
-  if((e.type==='response.output_audio_transcript.done'||e.type==='response.output_audio_transcript.delta')&&e.transcript?.trim()){
-    if(e.type==='response.output_audio_transcript.done'){
-      const t=e.transcript.trim(); history.push({role:'assistant',content:t}); addMessage(t,'assistant');
-    }
+  if(e.type==='response.output_audio_transcript.done'&&e.transcript?.trim()){
+    const t=e.transcript.trim(); history.push({role:'assistant',content:t}); addMessage(t,'assistant');
   }
 }
 
 async function startVoice(){
   if(pc)return;
   try{
+    if(!window.RTCPeerConnection) throw new Error('This browser does not support the required live voice connection.');
     if(!navigator.mediaDevices?.getUserMedia) throw new Error('This browser does not provide microphone access on this page.');
     setStatus('Requesting microphone permission…');
     $('voiceButton').disabled=true;
 
-    localStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    localStream=await navigator.mediaDevices.getUserMedia({audio:true});
     const track=localStream.getAudioTracks()[0];
     if(!track) throw new Error('No microphone audio track was found.');
-    setStatus(`Microphone ready — connecting…`);
+    setStatus('Microphone ready — connecting…');
 
     pc=new RTCPeerConnection();
-    pc.addTrack(track,localStream);
     pc.ontrack=e=>{
       const audio=$('remoteAudio');
       audio.srcObject=e.streams[0];
       audio.autoplay=true;
       audio.play().catch(()=>{});
     };
-    pc.onconnectionstatechange=()=>{
-      const s=pc?.connectionState;
-      if(s==='connected') setStatus('Voice live — start speaking');
-      if(s==='failed'||s==='disconnected') setStatus(`Voice connection ${s}`);
-    };
+
+    // Match OpenAI's browser WebRTC example: add the microphone track directly.
+    pc.addTrack(track);
 
     dataChannel=pc.createDataChannel('oai-events');
     dataChannel.onopen=()=>setStatus('Voice live — start speaking');
     dataChannel.onmessage=e=>handleRealtime(e.data);
     dataChannel.onerror=()=>setStatus('Voice data connection issue');
 
+    pc.onconnectionstatechange=()=>{
+      const s=pc?.connectionState;
+      if(s==='connected') setStatus('Voice live — start speaking');
+      if(s==='failed'||s==='disconnected') setStatus(`Voice connection ${s}`);
+    };
+
     const offer=await pc.createOffer();
     await pc.setLocalDescription(offer);
+    const sdp=pc.localDescription?.sdp || offer.sdp || '';
+    if(!sdp.trim().startsWith('v=0')) throw new Error('Edge did not create a valid microphone connection offer.');
+
     const style=encodeURIComponent($('style').value);
     const focus=encodeURIComponent($('focus').value);
     const r=await fetch(`/api/realtime/call?style=${style}&focus=${focus}`,{
       method:'POST',
       headers:{'Content-Type':'application/sdp'},
-      body:offer.sdp,
+      body:sdp,
       cache:'no-store'
     });
     if(!r.ok){
       let msg='Voice could not start';
-      try{const d=await r.json();if(d.error)msg=d.error}catch{}
+      const contentType=r.headers.get('content-type')||'';
+      if(contentType.includes('application/json')){try{const d=await r.json();if(d.error)msg=d.error}catch{}}
+      else {try{const t=await r.text();if(t)msg=t.slice(0,300)}catch{}}
       throw new Error(msg);
     }
     const answerSdp=await r.text();
+    if(!answerSdp.trim().startsWith('v=0')) throw new Error('The voice service returned an invalid connection response.');
     await pc.setRemoteDescription({type:'answer',sdp:answerSdp});
 
     $('voiceButton').classList.add('hidden');
@@ -92,7 +100,7 @@ async function startVoice(){
   }catch(e){
     const msg=e?.name==='NotAllowedError'
       ? 'Microphone permission was blocked. Click the site controls beside the address bar, set Microphone to Allow, refresh, and try again.'
-      : e.message;
+      : (e?.message||'Voice could not start.');
     stopVoice(false);
     addMessage(`Voice could not start: ${msg}`,'assistant');
     setStatus('Voice unavailable');
