@@ -9,6 +9,10 @@ const path = require('path');
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+
+// IMPORTANT: Parse WebRTC SDP as raw text before JSON/urlencoded middleware.
+// This mirrors OpenAI's current unified WebRTC example.
+app.use(express.text({ type: ['application/sdp', 'text/plain'], limit: '1mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '5m', etag: true }));
@@ -185,11 +189,12 @@ app.post('/api/session/notes', requireSession, async (req, res) => {
   } catch (err) { const f = friendlyError(err); res.status(f.status).json(f.body); }
 });
 
-// WebRTC unified-interface endpoint. The browser sends raw SDP, and this server
-// adds the private session configuration before calling OpenAI.
-app.post('/api/realtime/call', requireSession, express.text({ type: ['application/sdp', 'text/plain'], limit: '1mb' }), async (req, res) => {
-  const sdp = String(req.body || '');
-  if (!sdp.includes('v=0')) return res.status(400).json({ error: 'The browser did not provide a valid microphone connection offer.' });
+app.post('/api/realtime/call', requireSession, async (req, res) => {
+  const sdp = typeof req.body === 'string' ? req.body : Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
+  if (!sdp.trim().startsWith('v=0')) {
+    console.warn('Invalid SDP received', { contentType: req.headers['content-type'], bodyType: typeof req.body, length: sdp.length });
+    return res.status(400).json({ error: 'The browser microphone offer did not reach the TalkWise server correctly.' });
+  }
   const style = cleanStyle(String(req.query.style || 'reflective'));
   const focus = cleanFocus(String(req.query.focus || 'open'));
   try {
