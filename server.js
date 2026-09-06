@@ -9,14 +9,14 @@ const path = require('path');
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-app.use(express.text({ type: ['application/sdp', 'text/plain'], limit: '1mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'public'), { maxAge: '5m', etag: true }));
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0, etag: false }));
 
 const PORT = Number(process.env.PORT || 3000);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const TEXT_MODEL = process.env.OPENAI_TEXT_MODEL || 'gpt-5.6-terra';
+const TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'gpt-transcribe';
 const VOICE = process.env.OPENAI_VOICE || 'marin';
 const ACCESS_CODE = process.env.TALKWISE_ACCESS_CODE || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
@@ -42,13 +42,15 @@ const focusPrompts = {
 app.use('/api', rateLimit({ windowMs: 60_000, limit: 90, standardHeaders: 'draft-8', legacyHeaders: false }));
 
 function safeEqual(a, b) {
-  const aa = Buffer.from(String(a)); const bb = Buffer.from(String(b));
+  const aa = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
   return aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
 }
 function parseCookies(req) {
   const out = {};
   String(req.headers.cookie || '').split(';').forEach(part => {
-    const i = part.indexOf('='); if (i < 0) return;
+    const i = part.indexOf('=');
+    if (i < 0) return;
     out[decodeURIComponent(part.slice(0, i).trim())] = decodeURIComponent(part.slice(i + 1).trim());
   });
   return out;
@@ -95,7 +97,9 @@ function extractResponseText(data) {
   const pieces = [];
   for (const item of data.output || []) {
     if (item.type !== 'message') continue;
-    for (const part of item.content || []) if (part.type === 'output_text' && part.text) pieces.push(part.text);
+    for (const part of item.content || []) {
+      if (part.type === 'output_text' && part.text) pieces.push(part.text);
+    }
   }
   return pieces.join('\n').trim();
 }
@@ -107,13 +111,17 @@ async function openAI(req, endpoint, options = {}) {
   if (!OPENAI_API_KEY) throw Object.assign(new Error('OPENAI_API_KEY_MISSING'), { status: 500 });
   const response = await fetch(`https://api.openai.com${endpoint}`, {
     ...options,
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'OpenAI-Safety-Identifier': safetyIdentifier(req), ...(options.headers || {}) }
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'OpenAI-Safety-Identifier': safetyIdentifier(req),
+      ...(options.headers || {})
+    }
   });
   if (!response.ok) {
     const detail = await response.text();
     const err = new Error(`OPENAI_${response.status}`);
     err.status = response.status;
-    err.detail = detail.slice(0, 1200);
+    err.detail = detail.slice(0, 1800);
     throw err;
   }
   return response;
@@ -127,14 +135,51 @@ function friendlyError(err) {
 }
 async function respondText(req, instructionsText, input, maxOutputTokens = 1400) {
   const r = await openAI(req, '/v1/responses', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: TEXT_MODEL, reasoning: { effort: 'medium' }, instructions: instructionsText, input, max_output_tokens: maxOutputTokens })
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: TEXT_MODEL,
+      reasoning: { effort: 'medium' },
+      instructions: instructionsText,
+      input,
+      max_output_tokens: maxOutputTokens
+    })
   });
   return extractResponseText(await r.json());
 }
 
+async function transcribeWithModel(req, buffer, mime, model, usePrompt = true) {
+  const ext = mime.includes('mp4') ? 'mp4' : mime.includes('ogg') ? 'ogg' : mime.includes('mpeg') ? 'mp3' : 'webm';
+  const fd = new FormData();
+  fd.set('file', new Blob([buffer], { type: mime }), `talkwise-turn.${ext}`);
+  fd.set('model', model);
+  fd.set('language', 'en');
+  fd.set('response_format', 'json');
+  if (usePrompt) {
+    fd.set('prompt', 'Canadian English conversation with an AI named TalkWise. Transcribe exactly what the speaker says in English. Do not translate into another language. Common conversational phrases include: hello TalkWise, can you hear me, say something, surprise me, yes, no, sure, I want to talk, I have a question, what do you think, help me think this through.');
+  }
+  const r = await openAI(req, '/v1/audio/transcriptions', { method: 'POST', body: fd });
+  const data = await r.json();
+  return String(data.text || '').trim();
+}
+
+async function chooseShortTranscript(req, a, b) {
+  if (!a) return b || '';
+  if (!b || a.toLowerCase() === b.toLowerCase()) return a;
+  const judge = await respondText(
+    req,
+    'You are an automatic speech-recognition repair step. The speaker is a Canadian English speaker talking casually to an AI called TalkWise. Two speech recognizers heard the same short utterance differently. Return ONLY the most likely English utterance, with no quotes or explanation. Prefer ordinary conversational English over unlikely drug names, foreign phrases, proper nouns, or technical terms unless both candidates strongly support them. You may make only a minimal phonetic correction if both candidates are obviously corrupted. Do not invent extra meaning.',
+    [{ role: 'user', content: `Candidate A: ${a}\nCandidate B: ${b}` }],
+    80
+  );
+  return String(judge || a).trim().replace(/^['“”"]+|['“”"]+$/g, '');
+}
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
-app.get('/api/config', (req, res) => res.json({ accessRequired: Boolean(ACCESS_CODE), authenticated: validSession(req), voiceEnabled: true }));
+app.get('/api/config', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ accessRequired: Boolean(ACCESS_CODE), authenticated: validSession(req), voiceEnabled: true });
+});
 app.post('/api/session', (req, res) => {
   if (!ACCESS_CODE) return res.json({ ok: true });
   if (!safeEqual(String(req.body?.code || ''), ACCESS_CODE)) return res.status(401).json({ error: 'That access code is not correct.' });
@@ -148,30 +193,62 @@ app.post('/api/chat', requireSession, async (req, res) => {
   const message = String(req.body?.message || '').trim();
   if (!message) return res.json({ reply: '', crisis: false });
   const crisis = CRISIS_PATTERN.test(message);
-  const history = sanitizeHistory(req.body?.history); history.push({ role: 'user', content: message.slice(0, 14000) });
-  const crisisExtra = crisis ? `\n\nCRISIS OVERRIDE FOR THIS TURN: The user's language may indicate self-harm, suicide, or imminent violence. Be calm and direct. Ask about immediate safety and intent where appropriate. Encourage a nearby trusted person. In Canada, mention call/text 988 for suicide crisis support and 911 for immediate danger. Keep engaging and do not overwhelm them.` : '';
+  const history = sanitizeHistory(req.body?.history);
+  history.push({ role: 'user', content: message.slice(0, 14000) });
+  const crisisExtra = crisis
+    ? `\n\nCRISIS OVERRIDE FOR THIS TURN: The user's language may indicate self-harm, suicide, or imminent violence. Be calm and direct. Ask about immediate safety and intent where appropriate. Encourage a nearby trusted person. In Canada, mention call/text 988 for suicide crisis support and 911 for immediate danger. Keep engaging and do not overwhelm them.`
+    : '';
+  const languageExtra = req.body?.voice
+    ? `\n\nVOICE TURN LANGUAGE RULE: The user is speaking English. ALWAYS answer in natural English, even if the speech transcript contains a foreign-looking phrase or an obvious speech-recognition error. If a transcript is ambiguous, ask a short English clarification instead of assuming an unusual medical term, foreign phrase, proper noun, or technical term.`
+    : '';
   try {
-    const reply = await respondText(req, instructions(req.body?.style, req.body?.focus, req.body?.memories, crisisExtra), history, 1500);
+    const reply = await respondText(
+      req,
+      instructions(req.body?.style, req.body?.focus, req.body?.memories, crisisExtra + languageExtra),
+      history,
+      1500
+    );
     res.json({ reply: reply || 'Could you say that another way?', crisis });
-  } catch (err) { const f = friendlyError(err); res.status(f.status).json(f.body); }
+  } catch (err) {
+    const f = friendlyError(err);
+    res.status(f.status).json(f.body);
+  }
 });
 
-app.post('/api/voice/transcribe', requireSession, express.raw({ type: ['audio/webm', 'audio/mp4', 'audio/ogg', 'audio/mpeg', 'application/octet-stream'], limit: '12mb' }), async (req, res) => {
+app.post('/api/voice/transcribe', requireSession, express.raw({
+  type: ['audio/webm', 'audio/mp4', 'audio/ogg', 'audio/mpeg', 'application/octet-stream'],
+  limit: '16mb'
+}), async (req, res) => {
   try {
-    if (!Buffer.isBuffer(req.body) || req.body.length < 1000) return res.status(400).json({ error: 'No usable microphone audio was received.' });
+    if (!Buffer.isBuffer(req.body) || req.body.length < 700) {
+      return res.status(400).json({ error: 'No usable microphone audio was received.' });
+    }
     const mime = String(req.headers['content-type'] || 'audio/webm').split(';')[0].trim();
-    const ext = mime.includes('mp4') ? 'mp4' : mime.includes('ogg') ? 'ogg' : mime.includes('mpeg') ? 'mp3' : 'webm';
-    const fd = new FormData();
-    fd.set('file', new Blob([req.body], { type: mime }), `talkwise-turn.${ext}`);
-    fd.set('model', 'gpt-4o-transcribe');
-    fd.set('language', 'en');
-    fd.set('response_format', 'json');
-    const r = await openAI(req, '/v1/audio/transcriptions', { method: 'POST', body: fd });
-    const data = await r.json();
-    res.json({ text: String(data.text || '').trim() });
+    let primary = '';
+    try {
+      primary = await transcribeWithModel(req, req.body, mime, TRANSCRIBE_MODEL, true);
+    } catch (err) {
+      console.warn('Primary transcription model failed; falling back', { model: TRANSCRIBE_MODEL, status: err?.status });
+      primary = await transcribeWithModel(req, req.body, mime, 'gpt-4o-transcribe', true);
+    }
+
+    let finalText = primary;
+    const words = primary.split(/\s+/).filter(Boolean);
+    if (primary && words.length <= 4) {
+      try {
+        const secondary = await transcribeWithModel(req, req.body, mime, 'gpt-4o-transcribe', true);
+        finalText = await chooseShortTranscript(req, primary, secondary);
+      } catch (err) {
+        console.warn('Short-utterance cross-check failed', { status: err?.status });
+      }
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ text: finalText || primary });
   } catch (err) {
     console.error('Voice transcription failed', { status: err?.status, detail: err?.detail });
-    const f = friendlyError(err); res.status(f.status).json(f.body);
+    const f = friendlyError(err);
+    res.status(f.status).json(f.body);
   }
 });
 
@@ -186,7 +263,7 @@ app.post('/api/voice/speak', requireSession, async (req, res) => {
         model: 'gpt-4o-mini-tts',
         voice: VOICE,
         input,
-        instructions: 'Speak naturally, calmly, warmly, and intelligently. Sound like a thoughtful conversational partner, not an announcer.',
+        instructions: 'Speak in clear natural Canadian or neutral North American English. Sound calm, warm, intelligent, and conversational. Never switch languages. Do not sound like an announcer.',
         response_format: 'mp3'
       })
     });
@@ -196,7 +273,8 @@ app.post('/api/voice/speak', requireSession, async (req, res) => {
     res.send(audio);
   } catch (err) {
     console.error('Voice speech generation failed', { status: err?.status, detail: err?.detail });
-    const f = friendlyError(err); res.status(f.status).json(f.body);
+    const f = friendlyError(err);
+    res.status(f.status).json(f.body);
   }
 });
 
@@ -207,16 +285,22 @@ app.post('/api/journal/reflect', requireSession, async (req, res) => {
     const extra = `\n\nJOURNAL REFLECTION MODE: Reflect on the journal entry. Identify themes, tensions, assumptions, values, or questions worth exploring. Do not diagnose. Be concise. End with one thoughtful question.`;
     const reply = await respondText(req, instructions(req.body?.style, 'open', req.body?.memories, extra), [{ role: 'user', content: body }], 900);
     res.json({ reply });
-  } catch (err) { const f = friendlyError(err); res.status(f.status).json(f.body); }
+  } catch (err) {
+    const f = friendlyError(err);
+    res.status(f.status).json(f.body);
+  }
 });
 
 app.post('/api/session/memory', requireSession, async (req, res) => {
   const input = sanitizeHistory(req.body?.history);
   if (!input.length) return res.status(400).json({ error: 'There is no conversation to summarize.' });
   try {
-    const text = await respondText(req, `Create a compact long-term memory from this conversation for future TalkWise conversations. Include only durable, useful context the user would reasonably expect remembered: important relationships, goals, recurring concerns, preferences, or decisions. Exclude highly sensitive medical details unless the user clearly asked for them to be remembered. Write 2–5 concise bullets. Do not diagnose.`, input, 500);
+    const text = await respondText(req, 'Create a compact long-term memory from this conversation for future TalkWise conversations. Include only durable, useful context the user would reasonably expect remembered: important relationships, goals, recurring concerns, preferences, or decisions. Exclude highly sensitive medical details unless the user clearly asked for them to be remembered. Write 2–5 concise bullets. Do not diagnose.', input, 500);
     res.json({ text });
-  } catch (err) { const f = friendlyError(err); res.status(f.status).json(f.body); }
+  } catch (err) {
+    const f = friendlyError(err);
+    res.status(f.status).json(f.body);
+  }
 });
 
 app.post('/api/session/notes', requireSession, async (req, res) => {
@@ -226,11 +310,18 @@ app.post('/api/session/notes', requireSession, async (req, res) => {
     const focus = cleanFocus(req.body?.focus);
     const note = await respondText(req, `Write private session notes for the user, not clinical records. Use these headings: What we discussed; Patterns or tensions noticed; What seemed important; Questions to consider; Possible next step. Be concise, neutral, non-diagnostic, and useful for personal reflection. Session focus: ${focus}.`, input, 1100);
     res.json({ note });
-  } catch (err) { const f = friendlyError(err); res.status(f.status).json(f.body); }
+  } catch (err) {
+    const f = friendlyError(err);
+    res.status(f.status).json(f.body);
+  }
 });
 
 app.use((req, res, next) => {
-  if (req.method === 'GET' && !req.path.startsWith('/api/')) return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  if (req.method === 'GET' && !req.path.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  }
   next();
 });
+
 app.listen(PORT, '0.0.0.0', () => console.log(`TalkWise Web listening on http://0.0.0.0:${PORT}`));
