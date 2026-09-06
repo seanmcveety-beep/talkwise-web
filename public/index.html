@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>TalkWise</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <div class="brand">TalkWise</div>
+      <div class="tag">A private place to think out loud.</div>
+    </header>
+
+    <section class="panel intro">
+      <h1>What’s on your mind?</h1>
+      <p>TalkWise is an AI conversation partner informed by psychology, behavioural science and philosophy. It is not a psychologist, psychiatrist, doctor or emergency service.</p>
+    </section>
+
+    <section class="controls panel">
+      <label>Conversation style
+        <select id="style">
+          <option value="reflective">Reflective Analyst</option>
+          <option value="warm">Warm Guide</option>
+          <option value="direct">Direct Challenger</option>
+          <option value="philosophical">Philosophical Companion</option>
+        </select>
+      </label>
+      <label>Focus
+        <select id="focus">
+          <option value="open">Open conversation</option>
+          <option value="decision">Decision</option>
+          <option value="relationship">Relationship</option>
+          <option value="work">Work</option>
+          <option value="grief">Grief</option>
+          <option value="meaning">Meaning & purpose</option>
+          <option value="pattern">Repeating pattern</option>
+        </select>
+      </label>
+    </section>
+
+    <section id="access" class="panel hidden">
+      <h2>Private pilot</h2>
+      <p>Enter the access code to continue.</p>
+      <div class="row"><input id="accessCode" type="password" placeholder="Access code" /><button id="accessBtn">Enter</button></div>
+      <div id="accessError" class="error"></div>
+    </section>
+
+    <section id="chatPanel" class="panel chat hidden">
+      <div id="messages" class="messages"></div>
+      <div class="composer">
+        <textarea id="message" rows="3" placeholder="Type what you’re thinking..."></textarea>
+        <button id="send">Send</button>
+      </div>
+      <div id="status" class="status">Ready</div>
+    </section>
+
+    <footer>
+      If you may be in immediate danger, call 911. In Canada, call or text 988 for suicide crisis support.
+    </footer>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
